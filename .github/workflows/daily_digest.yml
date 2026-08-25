@@ -2,7 +2,10 @@ name: Daily Executive News Digest
 
 on:
   schedule:
+    # 23:00 UTC = 06:00 AM WIB (Morning Digest)
     - cron: '0 23 * * *'
+    # 14:00 UTC = 09:00 PM WIB (Evening Digest)
+    - cron: '0 14 * * *'
   workflow_dispatch:
 
 jobs:
