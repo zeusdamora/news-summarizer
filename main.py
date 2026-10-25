@@ -118,7 +118,7 @@ def fetch_rss_articles():
     return feed_data
 
 def process_with_gemini(feed_data):
-    """Pass clean data to Gemini for translation & concise bullet generation using structured JSON."""
+    """Pass clean data to Gemini using gemini-flash-latest with built-in retry logic."""
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     prompt = f"""
@@ -135,7 +135,6 @@ RULES:
 4. Keep summaries strictly factual based ONLY on the provided summary text.
 """
 
-    # Schema compatible with Gemini Developer API
     json_schema = {
         "type": "OBJECT",
         "properties": {
@@ -170,20 +169,29 @@ RULES:
         "required": ["market_overview", "categories"]
     }
 
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-            response_schema=json_schema
-        )
-    )
-    
-    return json.loads(response.text)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-flash-latest",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                    response_schema=json_schema
+                )
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            print(f"Gemini API attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                sleep_time = (attempt + 1) * 5
+                print(f"Retrying in {sleep_time} seconds...")
+                time.sleep(sleep_time)
+            else:
+                raise e
 
 def render_html_digest(processed_data):
-    """Python renders the final HTML safely to guarantee strict formatting."""
     overview = processed_data.get("market_overview", "")
     categories = processed_data.get("categories", [])
 
@@ -242,7 +250,7 @@ def send_email(html_body):
         {html_body}
 
         <div style="border-top: 1px solid #e5e7eb; margin-top: 35px; padding-top: 15px; text-align: center; color: #9ca3af; font-size: 12px;">
-          Automated via Gemini 3.8 Flash & GitHub Actions
+          Automated via Gemini Flash Latest & GitHub Actions
         </div>
       </body>
     </html>
@@ -265,7 +273,7 @@ def main():
         print("No new articles found. Skipping email.")
         return
 
-    print("Summarizing & translating with Gemini 3.8 Flash (Structured Output)...")
+    print("Summarizing & translating with Gemini Flash Latest (with auto-retry)...")
     processed_data = process_with_gemini(feed_data)
 
     print("Rendering HTML email...")
