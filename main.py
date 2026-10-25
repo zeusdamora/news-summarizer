@@ -1,156 +1,270 @@
+import json
 import os
 import re
 import smtplib
+import time
+from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import feedparser
 from google import genai
 from google.genai import types
 
-# --- 1. CONFIGURATION & ENVIRONMENT VARIABLES ---
+# Load local .env file if running locally
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# --- CONFIGURATION ---
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", GMAIL_USER)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Mapping Sectors to RSS Feeds (Increased sample size to feed up to 15 articles)
-SECTOR_FEEDS = {
-    "📈 Indonesian Business And Markets": [
-        "https://www.cnbcindonesia.com/market/rss",
-        "https://news.google.com/rss/search?q=IHSG+OR+ekonomi+indonesia&hl=id&gl=ID",
-    ],
-    "💻 Global Tech & Earnings": [
-        "https://news.google.com/rss/search?q=Alphabet+earnings+OR+Big+Tech+earnings&hl=en-US&gl=US",
-        "https://feeds.feedburner.com/TechCrunch/",
-    ],
-    "🇮🇩 Indonesian National News": [
-        "https://www.cnnindonesia.com/nasional/rss",
-        "https://rss.tempo.co/nasional",
-    ],
-    "🏛️ Politics & Geopolitics": [
-        "https://www.cnnindonesia.com/politik/rss",
-        "https://news.google.com/rss/search?q=geopolitics+OR+world+politics&hl=en-US&gl=US",
-    ],
-    "🎬 Pop Culture & Entertainment": [
-        "https://www.cnnindonesia.com/hiburan/rss",
-        "https://news.google.com/rss/search?q=pop+culture+news&hl=en-US&gl=US",
-    ],
+CACHE_FILE = "seen_urls.json"
+MAX_ARTICLE_AGE_HOURS = 24
+
+# Verify environment variables
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is missing.")
+if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+    raise ValueError("GMAIL_USER or GMAIL_APP_PASSWORD is missing.")
+
+RSS_FEEDS = {
+    "Macroeconomics & Markets": "https://investing.com/rss/news.rss",
+    "Indonesian Stock Market (IHSG)": "https://www.cnbcindonesia.com/market/rss",
+    "Global Tech & AI": "https://techcrunch.com/feed/",
+    "Palembang & South Sumatra Local": "https://sumsel.antaranews.com/rss/berita-palembang.xml",
+    "Business & Entrepreneurship": "https://feeds.feedburner.com/entrepreneur/latest"
 }
 
-# --- 2. FETCH ARTICLES ---
-def fetch_sector_articles():
-    sector_data = {}
-    for sector, urls in SECTOR_FEEDS.items():
-        articles = []
-        for url in urls:
-            try:
-                feed = feedparser.parse(url)
-                # Grab up to 8 articles per feed source to allow a deep list per sector
-                for entry in feed.entries[:8]:
-                    title = entry.get("title", "No Title")
-                    link = entry.get("link", "#")
-                    summary = entry.get("summary", entry.get("description", ""))
-                    clean_summary = re.sub(r"<[^>]+>", "", summary).strip()
-                    articles.append(
-                        f"- Title: {title}\n  URL: {link}\n  Snippet: {clean_summary}"
-                    )
-            except Exception as e:
-                print(f"Error fetching RSS feed {url}: {e}")
-        sector_data[sector] = "\n".join(articles)
-    return sector_data
+# Non-news / promotional keywords for Python-level filtering
+EXCLUDED_KEYWORDS = [
+    "sponsored", "promoted", "how to", "opinion:", "editorial:",
+    "top 10", "best deals", "guide to", "review:"
+]
 
-# --- 3. AI TRANSLATE & SUMMARIZE VIA GEMINI ---
-def generate_digest(sector_data):
+# --- HELPER FUNCTIONS ---
+
+def load_seen_urls():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+    return set()
+
+def save_seen_urls(seen_urls):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(list(seen_urls), f, indent=2)
+
+def is_recent(entry, max_hours=24):
+    """Check if the feed entry was published within the last max_hours."""
+    published_parsed = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if not published_parsed:
+        return True  # Retain if no timestamp provided by RSS source
+    
+    try:
+        entry_time = datetime.fromtimestamp(time.mktime(published_parsed), tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return (now - entry_time) <= timedelta(hours=max_hours)
+    except Exception:
+        return True
+
+def is_valid_news(title, summary):
+    """Filter out non-news articles using Python rules."""
+    combined = f"{title} {summary}".lower()
+    for kw in EXCLUDED_KEYWORDS:
+        if kw in combined:
+            return False
+    return True
+
+def fetch_rss_articles():
+    seen_urls = load_seen_urls()
+    new_seen_urls = set(seen_urls)
+    feed_data = {}
+
+    for category, url in RSS_FEEDS.items():
+        feed = feedparser.parse(url)
+        feed_data[category] = []
+        
+        for entry in feed.entries:
+            link = getattr(entry, "link", "").strip()
+            title = getattr(entry, "title", "").strip()
+            
+            if not link or not title or link in new_seen_urls:
+                continue
+            
+            if not is_recent(entry, max_hours=MAX_ARTICLE_AGE_HOURS):
+                continue
+
+            summary = getattr(entry, "summary", "") or getattr(entry, "description", "")
+            clean_summary = re.sub('<[^<]+?>', '', summary).strip()
+
+            if not is_valid_news(title, clean_summary):
+                continue
+
+            feed_data[category].append({
+                "title": title,
+                "link": link,
+                "summary": clean_summary[:300]
+            })
+            new_seen_urls.add(link)
+
+    save_seen_urls(new_seen_urls)
+    return feed_data
+
+def process_with_gemini(feed_data):
+    """Pass clean data to Gemini for translation & concise bullet generation using structured JSON."""
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    formatted_input = ""
-    for sector, text in sector_data.items():
-        formatted_input += f"\n=== SECTOR: {sector} ===\n{text}\n"
-
     prompt = f"""
-    You are an executive news editor. I will provide raw article snippets with titles and URLs across 5 categories in English and Indonesian.
+You are an executive translator and summarizer.
+Your task is ONLY to translate (if in Indonesian) and summarize the provided news items into clean English.
 
-    Task:
-    Translate all Indonesian text into clear, professional English and format EACH category using the EXACT structural template outlined below.
+INPUT DATA:
+{json.dumps(feed_data, indent=2)}
 
-    Formatting Structure required per Category/Sector:
-    
-    1. Category Header: `<h2>[Sector Name]</h2>` (Include relevant emojis inside headers)
-    2. Executive Synthesis Paragraph: 
-       Write a narrative overview synthesizing the big picture, major gainers/losers, market mood/state, key technical reasons, and major macro figures mentioned across the news. Sprinkle relevant emojis dynamic into the narrative. Reference underlying driver themes/articles inline.
-    3. Article Breakdown List: 
-       Following the paragraph summary, output a comprehensive list (`<ul>`) of headline bullet points covering the individual stories provided. 
-       - Each bullet headline MUST be wrapped inside a clickable HTML link `<a href="URL">` pointing to the article URL.
-       - Under each bullet point title, include a concise 1-2 sentence summary of that specific story. Continue this for as many distinct articles as provided (up to 10-15 stories per sector).
+RULES:
+1. Do NOT add, remove, or alter any article URLs.
+2. Maintain exact article mappings (title, link, and concise summary).
+3. If an article is in Indonesian, translate it into professional executive-level English.
+4. Keep summaries strictly factual based ONLY on the provided summary text.
+"""
 
-    Example layout to output for each sector:
-    <div>
-      <h2 style="color: #1a365d; border-bottom: 2px solid #3182ce; padding-bottom: 5px;">[Emoji] [Sector Name]</h2>
-      <p style="font-size: 14px; line-height: 1.6; color: #2d3748;">
-        [Overview narrative synthesizing macro state, market sentiment, key indicators/numbers, and technical drivers based on current news summaries...] 📈📊
-      </p>
-      <ul style="padding-left: 20px; color: #2d3748;">
-        <li style="margin-bottom: 10px;">
-          <strong><a href="URL" style="text-decoration: none; color: #2b6cb0;">[Headline Title 1]</a></strong><br/>
-          <span style="font-size: 13px; color: #4a5568;">[Summary of article 1]</span>
-        </li>
-        <li style="margin-bottom: 10px;">
-          <strong><a href="URL" style="text-decoration: none; color: #2b6cb0;">[Headline Title 2]</a></strong><br/>
-          <span style="font-size: 13px; color: #4a5568;">[Summary of article 2]</span>
-        </li>
-        <!-- repeat for all articles -->
-      </ul>
-    </div>
-
-    Formatting Rules:
-    - Output ONLY raw HTML inside container `<div>` elements. Do NOT use markdown code fences (```html).
-    - Ensure clean inline CSS styles for high readability in email clients.
-    - Sprinkle relevant emojis dynamically across headers, executive syntheses, and headlines to keep it engaging 🚀🔥.
-    - Make sure EVERY story headline is hyperlinked to its respective article URL.
-
-    Raw Articles:
-    {formatted_input}
-    """
+    # Schema forcing deterministic JSON response format
+    json_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "market_overview": {
+                "type": "STRING",
+                "description": "2-3 sentence overall summary of the day's top news stories."
+            },
+            "categorized_items": {
+                "type": "OBJECT",
+                "additionalProperties": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "emoji": {"type": "STRING"},
+                            "headline": {"type": "STRING"},
+                            "link": {"type": "STRING"},
+                            "summary": {"type": "STRING"}
+                        },
+                        "required": ["emoji", "headline", "link", "summary"]
+                    }
+                }
+            }
+        },
+        "required": ["market_overview", "categorized_items"]
+    }
 
     response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
-            temperature=0.2,
-        ),
+            temperature=0.0,  # Zero randomness for high fidelity
+            response_mime_type="application/json",
+            response_schema=json_schema
+        )
     )
+    
+    return json.loads(response.text)
 
-    clean_html = response.text.strip()
-    clean_html = re.sub(r"^```html\s*", "", clean_html, flags=re.MULTILINE)
-    clean_html = re.sub(r"^```\s*$", "", clean_html, flags=re.MULTILINE)
+def render_html_digest(processed_data):
+    """Python renders the final HTML safely to guarantee strict formatting."""
+    overview = processed_data.get("market_overview", "")
+    categories = processed_data.get("categorized_items", {})
 
-    return clean_html
+    html_parts = []
+    
+    if overview:
+        html_parts.append(f"""
+        <div style="background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+          <h2 style="font-size: 18px; color: #111827; margin-top: 0;">Executive Overview</h2>
+          <p style="margin: 0; color: #374151;">{overview}</p>
+        </div>
+        """)
 
-# --- 4. GMAIL DISPATCHER ---
+    for cat_name, items in categories.items():
+        if not items:
+            continue
+        
+        html_parts.append(f'<h2 style="font-size: 16px; color: #1f2937; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px;">{cat_name}</h2>')
+        html_parts.append('<ul style="padding-left: 20px; margin-bottom: 25px;">')
+        
+        for item in items:
+            emoji = item.get("emoji", "📰")
+            headline = item.get("headline", "")
+            link = item.get("link", "#")
+            summary = item.get("summary", "")
+
+            html_parts.append(f"""
+            <li style="margin-bottom: 12px;">
+              <strong><a href="{link}" style="color: #2563eb; text-decoration: none;">{emoji} {headline}</a></strong> — {summary}
+            </li>
+            """)
+        
+        html_parts.append('</ul>')
+
+    return "\n".join(html_parts)
+
 def send_email(html_body):
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        raise ValueError("Missing GMAIL_USER or GMAIL_APP_PASSWORD environment variables.")
+    today = datetime.now().strftime("%B %d, %Y")
+    subject = f"📰 Executive News Digest — {today}"
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "☕ Daily Market Overview & News Breakdown 📰"
+    msg["Subject"] = subject
     msg["From"] = GMAIL_USER
     msg["To"] = RECIPIENT_EMAIL
 
-    html_part = MIMEText(html_body, "html")
-    msg.attach(html_part)
+    full_html = f"""
+    <html>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1f2937; line-height: 1.6; max-width: 680px; margin: 0 auto; padding: 20px;">
+        <div style="border-bottom: 2px solid #e5e7eb; padding-bottom: 15px; margin-bottom: 25px;">
+          <h1 style="font-size: 24px; color: #111827; margin: 0;">Daily Executive News Digest</h1>
+          <p style="color: #6b7280; font-size: 14px; margin: 5px 0 0 0;">Palembang Time • {today}</p>
+        </div>
+        
+        {html_body}
+
+        <div style="border-top: 1px solid #e5e7eb; margin-top: 35px; padding-top: 15px; text-align: center; color: #9ca3af; font-size: 12px;">
+          Automated via Gemini 2.5 Flash & GitHub Actions
+        </div>
+      </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(full_html, "html"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         server.sendmail(GMAIL_USER, RECIPIENT_EMAIL, msg.as_string())
-    print("Email sent successfully!")
 
-# --- MAIN EXECUTION ---
-if __name__ == "__main__":
-    print("Fetching news feeds...")
-    raw_data = fetch_sector_articles()
+def main():
+    print("Fetching and filtering RSS articles in Python...")
+    feed_data = fetch_rss_articles()
+    
+    total_articles = sum(len(items) for items in feed_data.values())
+    print(f"Total verified articles parsed: {total_articles}")
+    
+    if total_articles == 0:
+        print("No new articles found. Skipping email.")
+        return
 
-    print("Summarizing & Formatting via Gemini...")
-    digest_html = generate_digest(raw_data)
+    print("Summarizing & translating with Gemini 2.5 Flash (Structured Output)...")
+    processed_data = process_with_gemini(feed_data)
 
-    print("Sending Gmail...")
+    print("Rendering HTML email...")
+    digest_html = render_html_digest(processed_data)
+
+    print("Sending email...")
     send_email(digest_html)
+    print("Digest successfully sent!")
+
+if __name__ == "__main__":
+    main()
