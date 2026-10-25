@@ -123,19 +123,19 @@ def process_with_gemini(feed_data):
 
     prompt = f"""
 You are an executive translator and summarizer.
-Your task is ONLY to translate (if in Indonesian) and summarize the provided news items into clean English.
+Your task is ONLY to translate (if in Indonesian) and summarize the provided news items into clean English, grouped by their original categories.
 
 INPUT DATA:
 {json.dumps(feed_data, indent=2)}
 
 RULES:
 1. Do NOT add, remove, or alter any article URLs.
-2. Maintain exact article mappings (title, link, and concise summary).
+2. Maintain exact article mappings.
 3. If an article is in Indonesian, translate it into professional executive-level English.
 4. Keep summaries strictly factual based ONLY on the provided summary text.
 """
 
-    # Schema forcing deterministic JSON response format
+    # Schema compatible with Gemini Developer API (using array of categories instead of additionalProperties)
     json_schema = {
         "type": "OBJECT",
         "properties": {
@@ -143,31 +143,38 @@ RULES:
                 "type": "STRING",
                 "description": "2-3 sentence overall summary of the day's top news stories."
             },
-            "categorized_items": {
-                "type": "OBJECT",
-                "additionalProperties": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "emoji": {"type": "STRING"},
-                            "headline": {"type": "STRING"},
-                            "link": {"type": "STRING"},
-                            "summary": {"type": "STRING"}
-                        },
-                        "required": ["emoji", "headline", "link", "summary"]
-                    }
+            "categories": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "category_name": {"type": "STRING"},
+                        "items": {
+                            "type": "ARRAY",
+                            "items": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "emoji": {"type": "STRING"},
+                                    "headline": {"type": "STRING"},
+                                    "link": {"type": "STRING"},
+                                    "summary": {"type": "STRING"}
+                                },
+                                "required": ["emoji", "headline", "link", "summary"]
+                            }
+                        }
+                    },
+                    "required": ["category_name", "items"]
                 }
             }
         },
-        "required": ["market_overview", "categorized_items"]
+        "required": ["market_overview", "categories"]
     }
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
-            temperature=0.0,  # Zero randomness for high fidelity
+            temperature=0.0,
             response_mime_type="application/json",
             response_schema=json_schema
         )
@@ -178,7 +185,7 @@ RULES:
 def render_html_digest(processed_data):
     """Python renders the final HTML safely to guarantee strict formatting."""
     overview = processed_data.get("market_overview", "")
-    categories = processed_data.get("categorized_items", {})
+    categories = processed_data.get("categories", [])
 
     html_parts = []
     
@@ -190,7 +197,9 @@ def render_html_digest(processed_data):
         </div>
         """)
 
-    for cat_name, items in categories.items():
+    for cat in categories:
+        cat_name = cat.get("category_name", "News")
+        items = cat.get("items", [])
         if not items:
             continue
         
