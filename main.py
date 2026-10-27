@@ -32,12 +32,13 @@ if not GEMINI_API_KEY:
 if not GMAIL_USER or not GMAIL_APP_PASSWORD:
     raise ValueError("GMAIL_USER or GMAIL_APP_PASSWORD is missing.")
 
+# Updated RSS Feeds matching your specific topics
 RSS_FEEDS = {
     "Macroeconomics & Markets": "https://investing.com/rss/news.rss",
-    "Indonesian Stock Market (IHSG)": "https://www.cnbcindonesia.com/market/rss",
+    "Indonesia": "https://www.cnbcindonesia.com/market/rss",
     "Global Tech & AI": "https://techcrunch.com/feed/",
-    "Palembang & South Sumatra Local": "https://sumsel.antaranews.com/rss/berita-palembang.xml",
-    "Business & Entrepreneurship": "https://feeds.feedburner.com/entrepreneur/latest"
+    "Geopolitical Tensions": "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "Cryptocurrency": "https://www.coindesk.com/arc/outboundfeeds/rss/"
 }
 
 # Non-news / promotional keywords for Python-level filtering
@@ -118,12 +119,13 @@ def fetch_rss_articles():
     return feed_data
 
 def process_with_gemini(feed_data):
-    """Pass clean data to Gemini using gemini-flash-latest with built-in retry logic."""
+    """Pass clean data to Gemini with topic mini-summaries and global overview."""
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     prompt = f"""
-You are an executive translator and summarizer.
-Your task is ONLY to translate (if in Indonesian) and summarize the provided news items into clean English, grouped by their original categories.
+You are an executive intelligence editor. 
+Your task is ONLY to translate (if in Indonesian) and summarize the provided news items into clean English.
+For each category, provide a concise 1-2 sentence topic mini-summary alongside the individual bulleted items.
 
 INPUT DATA:
 {json.dumps(feed_data, indent=2)}
@@ -131,7 +133,7 @@ INPUT DATA:
 RULES:
 1. Do NOT add, remove, or alter any article URLs.
 2. Maintain exact article mappings.
-3. If an article is in Indonesian, translate it into professional executive-level English.
+3. If an article is in Indonesian (like CNBC Indonesia), translate it into professional executive-level English, maintaining local context (e.g., IHSG, Rupiah, Bank Indonesia).
 4. Keep summaries strictly factual based ONLY on the provided summary text.
 """
 
@@ -140,7 +142,7 @@ RULES:
         "properties": {
             "market_overview": {
                 "type": "STRING",
-                "description": "2-3 sentence overall summary of the day's top news stories."
+                "description": "2-3 sentence overall macroeconomic summary of the day's major developments."
             },
             "categories": {
                 "type": "ARRAY",
@@ -148,6 +150,7 @@ RULES:
                     "type": "OBJECT",
                     "properties": {
                         "category_name": {"type": "STRING"},
+                        "category_summary": {"type": "STRING", "description": "1-2 sentence overview/summary specifically for this topic category."},
                         "items": {
                             "type": "ARRAY",
                             "items": {
@@ -162,7 +165,7 @@ RULES:
                             }
                         }
                     },
-                    "required": ["category_name", "items"]
+                    "required": ["category_name", "category_summary", "items"]
                 }
             }
         },
@@ -199,7 +202,7 @@ def render_html_digest(processed_data):
     
     if overview:
         html_parts.append(f"""
-        <div style="background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+        <div style="background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin-bottom: 25px;">
           <h2 style="font-size: 18px; color: #111827; margin-top: 0;">Executive Overview</h2>
           <p style="margin: 0; color: #374151;">{overview}</p>
         </div>
@@ -207,12 +210,18 @@ def render_html_digest(processed_data):
 
     for cat in categories:
         cat_name = cat.get("category_name", "News")
+        cat_summary = cat.get("category_summary", "")
         items = cat.get("items", [])
+        
         if not items:
             continue
         
-        html_parts.append(f'<h2 style="font-size: 16px; color: #1f2937; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px;">{cat_name}</h2>')
-        html_parts.append('<ul style="padding-left: 20px; margin-bottom: 25px;">')
+        html_parts.append(f'<h2 style="font-size: 16px; color: #1f2937; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px; margin-top: 25px;">{cat_name}</h2>')
+        
+        if cat_summary:
+            html_parts.append(f'<p style="font-size: 14px; color: #4b5563; font-style: italic; margin: 5px 0 12px 0;">{cat_summary}</p>')
+            
+        html_parts.append('<ul style="padding-left: 20px; margin-bottom: 20px;">')
         
         for item in items:
             emoji = item.get("emoji", "📰")
@@ -221,7 +230,7 @@ def render_html_digest(processed_data):
             summary = item.get("summary", "")
 
             html_parts.append(f"""
-            <li style="margin-bottom: 12px;">
+            <li style="margin-bottom: 10px;">
               <strong><a href="{link}" style="color: #2563eb; text-decoration: none;">{emoji} {headline}</a></strong> — {summary}
             </li>
             """)
@@ -273,7 +282,7 @@ def main():
         print("No new articles found. Skipping email.")
         return
 
-    print("Summarizing & translating with Gemini Flash Latest (with auto-retry)...")
+    print("Summarizing & translating with Gemini Flash Latest (with topic summaries)...")
     processed_data = process_with_gemini(feed_data)
 
     print("Rendering HTML email...")
