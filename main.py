@@ -32,10 +32,11 @@ if not GEMINI_API_KEY:
 if not GMAIL_USER or not GMAIL_APP_PASSWORD:
     raise ValueError("GMAIL_USER or GMAIL_APP_PASSWORD is missing.")
 
-# Updated RSS Feeds matching your specific topics
+# Updated RSS Feeds including Indonesian Politics
 RSS_FEEDS = {
     "Macroeconomics & Markets": "https://investing.com/rss/news.rss",
     "Indonesia": "https://www.cnbcindonesia.com/market/rss",
+    "Indonesian Politics": "https://www.antaranews.com/rss/politik.xml",
     "Global Tech & AI": "https://techcrunch.com/feed/",
     "Geopolitical Tensions": "https://feeds.bbci.co.uk/news/world/rss.xml",
     "Cryptocurrency": "https://www.coindesk.com/arc/outboundfeeds/rss/"
@@ -133,7 +134,7 @@ INPUT DATA:
 RULES:
 1. Do NOT add, remove, or alter any article URLs.
 2. Maintain exact article mappings.
-3. If an article is in Indonesian (like CNBC Indonesia), translate it into professional executive-level English, maintaining local context (e.g., IHSG, Rupiah, Bank Indonesia).
+3. If an article is in Indonesian (like CNBC Indonesia or Antara Politik), translate it into professional executive-level English, maintaining local political/market context.
 4. Keep summaries strictly factual based ONLY on the provided summary text.
 """
 
