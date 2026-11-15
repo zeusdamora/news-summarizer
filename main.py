@@ -176,7 +176,7 @@ RULES:
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
@@ -259,7 +259,7 @@ def send_email(html_body):
         {html_body}
 
         <div style="border-top: 1px solid #e5e7eb; margin-top: 35px; padding-top: 15px; text-align: center; color: #9ca3af; font-size: 12px;">
-          Automated via Gemini 2.5 Flash & GitHub Actions
+          Automated via Gemini 3.8 Flash & GitHub Actions
         </div>
       </body>
     </html>
@@ -282,7 +282,7 @@ def main():
         print("No new articles found. Skipping email.")
         return
 
-    print("Summarizing & translating with Gemini 2.5 Flash (with topic summaries)...")
+    print("Summarizing & translating with Gemini 3.8 Flash (with topic summaries)...")
     processed_data = process_with_gemini(feed_data)
 
     print("Rendering HTML email...")
